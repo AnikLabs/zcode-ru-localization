@@ -1,77 +1,87 @@
-# Русификатор ZCode Desktop
+<p align="center">
+  <strong>-------></strong>
+  <a href="/README.md">Russian</a> |
+  <a href="/README.en.md">English</a> |
+  <a href="/README.es.md">Spanish</a> |
+  <a href="/README.zh.md">Chinese</a> |
+  <strong><-------</strong>
+</p>
 
-Неофициальная русская локализация (ru-RU) для [ZCode Desktop](https://z.ai) —
-GUI-клиента для AI-кодинг-агента. Официально программа поставляется только с
-английским и китайским языком; этот проект добавляет полноценный русский
-интерфейс: настройки, меню, диалоги, трей, «О программе» (~4900 строк).
+# ZCode Desktop Russian Localization
 
-Работает с **любой версией** программы: установщик сам извлекает `app.asar`,
-находит нужные файлы по сигнатурам кода и накладывает патчи. Непереведённые
-строки из новых версий показываются английскими — ничего не ломается.
+Unofficial Russian (ru-RU) localization for ZCode Desktop, a GUI client for an
+AI coding agent. The official app ships with English and Chinese only; this
+project adds a full Russian UI: settings, menus, dialogs, tray, About window
+(~4,900 strings).
 
-## Установка (автоматически)
+Works with **any version** of the app: the installer extracts `app.asar`,
+locates the needed files by code signatures, and applies patches. Untranslated
+strings from newer versions simply show in English — nothing breaks.
 
-1. Полностью закройте ZCode (включая значок в трее).
-2. Скачайте папку проекта (или Release), запустите **`РусификаторZCode.exe`**.
-3. Выберите папку с ZCode → «Установить русский язык».
-4. Запустите ZCode — интерфейс на русском.
+## Installation (automatic)
 
-Альтернатива без GUI — PowerShell:
+1. Fully quit ZCode (including the tray icon).
+2. Download the archive from the [Releases](../../releases) page (file
+   `zcode-ru-localization-vX.X.X.zip`), unpack it, and run
+   **`РусификаторZCode.exe`**.
+3. Pick your ZCode folder → click "Install Russian language".
+4. Start ZCode — the UI is now in Russian.
+
+A GUI-free alternative is PowerShell:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File install-ru.ps1 [-InstallDir "C:\путь\к\ZCode"]
+powershell -ExecutionPolicy Bypass -File install-ru.ps1 [-InstallDir "C:\path\to\ZCode"]
 ```
 
-Требования: [Node.js](https://nodejs.org) в PATH.
+Requirements: [Node.js](https://nodejs.org) in PATH.
 
-## Как это работает
+## Rollback
 
-- Electron загружает папку `resources/app` **вместо** `app.asar`, если она
-  существует. Установщик не пересобирает архив, а кладёт рядом патченную папку
-  (оригинал сохраняется как `app.asar.orig`).
-- `patch.mjs` находит каталог локализации по сигнатуре
-  `g={"zh-CN":…,"en-US":…}` (имена файлов меняются между версиями), внедряет
-  русский каталог, добавляет `ru-RU` в схемы валидации, переключатели языка,
-  каталоги трея и «О программе».
-- Перед установкой патчер проверяет синтаксис патченных файлов; при любой
-  ошибке установка отменяется, программа остаётся нетронутой.
+Click "Rollback" in the program, or manually: delete `resources\app` and
+rename `resources\app.asar.orig` back to `resources\app.asar`.
 
-## Откат
+## After updating ZCode
 
-Кнопка «Откатить» в программе, или вручную:
-удалите `resources\app` и переименуйте `resources\app.asar.orig` обратно в
-`resources\app.asar`.
+An app update restores English. Just run the installer again — it re-applies
+the patch to the new version. Strings that are not yet translated show in
+English.
 
-## После обновления ZCode
+## How it works
 
-Обновление возвращает английский язык. Просто запустите установщик ещё раз —
-патч накатится на новую версию. Строки, которых ещё нет в переводе, будут
-на английском.
+- Electron loads a `resources/app` directory **instead of** `app.asar` when it
+  exists. The installer does not repack the archive; it places the patched
+  folder next to it (the original is kept as `app.asar.orig`).
+- `patch.mjs` locates the message catalog by its signature
+  `g={"zh-CN":…,"en-US":…}` (file names change between versions), injects the
+  Russian catalog, adds `ru-RU` to validation schemas, language pickers, and
+  the tray/About catalogs.
+- Before installing, the patcher syntax-checks the patched files; on any error
+  the installation is aborted and the app remains untouched.
 
-## Пополнение перевода
+## Contributing translations
 
-Все строки лежат в [`ru.json`](ru.json) (ключ → текст). Нашели непереведённое —
-добавьте пару и перезапустите установщик. Формат плейсхолдеров
-(`{version}`, `{count}`) менять нельзя.
+All strings live in [`ru.json`](ru.json) (key → text). Found an untranslated
+string? Add the pair and rerun the installer. Never alter placeholder tokens
+(`{version}`, `{count}`).
 
-## Сборка установщика из исходников
+## Building the installer from source
 
-exe компилируется стандартным компилятором .NET Framework (есть на любой
-Windows), устанавливать ничего не нужно:
+The exe compiles with the .NET Framework compiler that ships with Windows —
+nothing to install. Run `Build.bat` or:
 
 ```bat
 C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe -nologo -target:winexe -out:"РусификаторZCode.exe" InstallRu.cs -r:System.Windows.Forms.dll -r:System.Drawing.dll
 ```
 
-Рядом с exe должны лежать `patch.mjs`, `ru.json` и `node_modules`
-(`npm install @electron/asar`).
+The exe expects `patch.mjs`, `ru.json`, and `node_modules`
+(`npm install @electron/asar`) next to it.
 
-## Дисклеймер
+## Disclaimer
 
-Неофициальный проект, не связан с разработчиками ZCode. Патчит только файлы
-локализации на вашем компьютере. Автор не несёт ответственности за возможные
-проблемы — всегда можно откатиться (см. выше).
+Unofficial project, not affiliated with the ZCode developers. Only
+localization files on your machine are patched. The author is not liable for
+any issues — you can always roll back (see above).
 
-## Лицензия
+## License
 
 [MIT](LICENSE)
