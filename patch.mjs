@@ -90,15 +90,15 @@ patchAllFiles('enum(["system","zh-CN","en-US"])', 'enum(["system","zh-CN","en-US
 patchAllFiles('[`zh-CN`,`en-US`]', '[`zh-CN`,`en-US`,`ru-RU`]', 'union renderer zh/en');
 patchAllFiles('[`system`,`zh-CN`,`en-US`]', '[`system`,`zh-CN`,`en-US`,`ru-RU`]', 'union renderer system');
 
-// --- 3b. проверка поддерживаемых языков в рендерере: e===`zh-CN`||e===`en-US` ---
+// --- 3b. проверка поддерживаемых языков в рендерере: X===`zh-CN`||X===`en-US` ---
 {
-  const re = /([)(&|!\s])`zh-CN`\|\|(\w+)===`en-US`/g;
+  const re = /(\w+)===`zh-CN`\|\|\1===`en-US`/g;
   let n = 0;
   for (const f of files) {
     const fp = path.join(assetsDir, f);
     const s = fs.readFileSync(fp, 'utf8');
     if (!re.test(s)) continue;
-    fs.writeFileSync(fp, s.replace(re, (w, pre, v) => `${pre}\`zh-CN\`||${v}===\`en-US\`||${v}===\`ru-RU\``), 'utf8');
+    fs.writeFileSync(fp, s.replace(re, (w, v) => `${v}===\`zh-CN\`||${v}===\`en-US\`||${v}===\`ru-RU\``), 'utf8');
     n++;
   }
   (n ? applied : missed).push(`проверка поддерживаемых языков (${n} файлов)`);

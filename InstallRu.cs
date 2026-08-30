@@ -1,9 +1,10 @@
-// Русификатор ZCode Desktop — простой установщик с выбором папки.
+// Русификатор ZCode Desktop — установщик с выбором папки и прогресс-баром.
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace ZCodeRuInstaller
@@ -13,11 +14,13 @@ namespace ZCodeRuInstaller
         TextBox pathBox;
         Button browse, install, rollback;
         TextBox log;
+        ProgressBar progress;
+        Label stage;
 
         public MainForm()
         {
             Text = "Русификатор ZCode Desktop";
-            Width = 680; Height = 460;
+            Width = 680; Height = 500;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
 
@@ -26,7 +29,9 @@ namespace ZCodeRuInstaller
             browse = new Button { Text = "Обзор...", Left = 550, Top = 9, Width = 100 };
             install = new Button { Text = "Установить русский язык", Left = 12, Top = 45, Width = 300, Height = 32 };
             rollback = new Button { Text = "Откатить (вернуть как было)", Left = 322, Top = 45, Width = 300, Height = 32 };
-            log = new TextBox { Left = 12, Top = 90, Width = 638, Height = 310, Multiline = true,
+            progress = new ProgressBar { Left = 12, Top = 84, Width = 638, Height = 20, Minimum = 0, Maximum = 100, Value = 0 };
+            stage = new Label { Text = "", Left = 14, Top = 106, Width = 500, ForeColor = System.Drawing.Color.DimGray };
+            log = new TextBox { Left = 12, Top = 130, Width = 638, Height = 300, Multiline = true,
                 ScrollBars = ScrollBars.Vertical, ReadOnly = true, Font = new System.Drawing.Font("Consolas", 9) };
 
             browse.Click += (s, e) => Browse();
@@ -34,9 +39,9 @@ namespace ZCodeRuInstaller
             rollback.Click += (s, e) => Rollback();
 
             Controls.Add(lbl); Controls.Add(pathBox); Controls.Add(browse);
-            Controls.Add(install); Controls.Add(rollback); Controls.Add(log);
+            Controls.Add(install); Controls.Add(rollback); Controls.Add(progress);
+            Controls.Add(stage); Controls.Add(log);
 
-            // автопоиск
             string found = FindZCode();
             if (found != null) pathBox.Text = found;
         }
@@ -58,10 +63,15 @@ namespace ZCodeRuInstaller
             Application.DoEvents();
         }
 
-        int Run(string file, string args, out string output)
+        void SetStage(int percent, string text)
         {
-            var sb = new StringBuilder();
-            output = "";
+            progress.Value = Math.Max(progress.Minimum, Math.Min(progress.Maximum, percent));
+            stage.Text = text;
+            Application.DoEvents();
+        }
+
+        int RunLive(string file, string args)
+        {
             var psi = new ProcessStartInfo(file, args)
             {
                 UseShellExecute = false,
@@ -73,10 +83,14 @@ namespace ZCodeRuInstaller
             };
             using (var p = Process.Start(psi))
             {
-                p.OutputDataReceived += (s, e) => { if (e.Data != null) { sb.AppendLine(e.Data); LogLine("  " + e.Data); } };
-                p.ErrorDataReceived += (s, e) => { if (e.Data != null) { sb.AppendLine(e.Data); LogLine("  " + e.Data); } };
+                p.OutputDataReceived += (s, e) => { if (e.Data != null) LogLine("  " + e.Data); };
+                p.ErrorDataReceived += (s, e) => { if (e.Data != null) LogLine("  " + e.Data); };
                 p.BeginOutputReadLine(); p.BeginErrorReadLine();
-                p.WaitForExit();
+                while (!p.HasExited)
+                {
+                    p.WaitForExit(200);
+                    Application.DoEvents();
+                }
                 return p.ExitCode;
             }
         }
@@ -105,17 +119,17 @@ namespace ZCodeRuInstaller
             return false;
         }
 
-        void Install()
+        async void Install()
         {
-            install.Enabled = false; rollback.Enabled = false;
-            try { DoInstall(); }
+            install.Enabled = false; rollback.Enabled = false; browse.Enabled = false;
+            try { await DoInstall(); }
             catch (Exception ex) { LogLine("ОШИБКА: " + ex.Message); MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-            install.Enabled = true; rollback.Enabled = true;
+            install.Enabled = true; rollback.Enabled = true; browse.Enabled = true;
         }
 
-        void DoInstall()
+        async Task DoInstall()
         {
-            log.Clear();
+            log.Clear(); progress.Value = 0; stage.Text = "";
             string dir = pathBox.Text.Trim();
             string res = Path.Combine(dir, "resources");
             string asar = Path.Combine(res, "app.asar");
@@ -134,38 +148,59 @@ namespace ZCodeRuInstaller
             if (!File.Exists(patch)) { LogLine("Рядом с программой нет patch.mjs (" + scriptDir + ")"); return; }
 
             string temp = Path.Combine(Path.GetTempPath(), "zcode-ru-patch");
-            LogLine("Патчу файлы (1-2 минуты)...");
-            string tmpOut; int code = Run(node, "\"" + patch + "\" \"" + asar + "\" \"" + temp + "\"", out tmpOut);
-            if (code != 0) { LogLine("Патч не удался — программа НЕ изменена."); return; }
+            SetStage(5, "Патчинг файлов (1-2 минуты)...");
+            progress.Style = ProgressBarStyle.Marquee; progress.MarqueeAnimationSpeed = 30;
+            LogLine("Патчу файлы...");
+            int code = RunLive(node, "\"" + patch + "\" \"" + asar + "\" \"" + temp + "\"");
+            progress.Style = ProgressBarStyle.Continuous;
+            if (code != 0) { SetStage(0, ""); LogLine("Патч не удался — программа НЕ изменена."); return; }
 
             string backup = Path.Combine(res, "app.asar.bak");
             if (!File.Exists(backup)) { File.Copy(asar, backup); LogLine("Бэкап: app.asar.bak"); }
+            SetStage(70, "Копирование файлов...");
 
-            LogLine("Копирую файлы...");
-            code = Run("robocopy", "\"" + temp + "\" \"" + appDir + "\" /E /NFL /NDL /NJH /NJS", out tmpOut);
+            await Task.Run(() => CopyDirectory(temp, appDir, 70, 95));
             try { Directory.Delete(temp, true); } catch { }
-            if (code >= 8) { LogLine("Ошибка копирования (robocopy " + code + ")."); return; }
 
+            SetStage(96, "Сохранение оригинала...");
             string orig = Path.Combine(res, "app.asar.orig");
             if (File.Exists(asar)) File.Move(asar, orig);
             LogLine("Оригинал сохранён: app.asar.orig");
 
+            SetStage(98, "Включение русского языка...");
             SetLocaleRu();
+
+            SetStage(100, "Готово!");
             LogLine("");
             LogLine("ГОТОВО! Запустите ZCode — интерфейс будет на русском.");
             MessageBox.Show("Установка завершена!\n\nЗапустите ZCode — интерфейс будет на русском.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
+        void CopyDirectory(string src, string dst, int fromPct, int toPct)
+        {
+            var files = Directory.GetFiles(src, "*", SearchOption.AllDirectories);
+            long total = 0, done = 0;
+            foreach (var f in files) total += new FileInfo(f).Length;
+            int lastPct = fromPct;
+            foreach (var f in files)
+            {
+                string rel = f.Substring(src.Length + 1);
+                string target = Path.Combine(dst, rel);
+                Directory.CreateDirectory(Path.GetDirectoryName(target));
+                File.Copy(f, target, true);
+                done += new FileInfo(f).Length;
+                int pct = fromPct + (int)((double)done / total * (toPct - fromPct));
+                if (pct != lastPct) { lastPct = pct; SetStage(pct, "Копирование файлов: " + pct + "%"); }
+            }
+        }
+
         string FindNode()
         {
-            foreach (var name in new[] { "node.exe" })
+            var psi = new ProcessStartInfo("where", "node.exe") { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
+            using (var p = Process.Start(psi))
             {
-                var psi = new ProcessStartInfo("where", name) { UseShellExecute = false, RedirectStandardOutput = true, CreateNoWindow = true };
-                using (var p = Process.Start(psi))
-                {
-                    string outp = p.StandardOutput.ReadToEnd(); p.WaitForExit();
-                    foreach (var line in outp.Split('\n')) { var t = line.Trim(); if (File.Exists(t)) return t; }
-                }
+                string outp = p.StandardOutput.ReadToEnd(); p.WaitForExit();
+                foreach (var line in outp.Split('\n')) { var t = line.Trim(); if (File.Exists(t)) return t; }
             }
             return null;
         }
@@ -187,7 +222,7 @@ namespace ZCodeRuInstaller
 
         void Rollback()
         {
-            log.Clear();
+            log.Clear(); progress.Value = 0; stage.Text = "";
             try
             {
                 string dir = pathBox.Text.Trim();
@@ -198,13 +233,16 @@ namespace ZCodeRuInstaller
 
                 if (ZCodeRunning(dir)) { LogLine("Сначала ЗАКРОЙТЕ ZCode."); return; }
                 if (!File.Exists(orig) && !Directory.Exists(appDir)) { LogLine("Откатывать нечего — русификация не установлена."); return; }
+                SetStage(30, "Удаление русской папки...");
                 if (Directory.Exists(appDir)) { Directory.Delete(appDir, true); LogLine("Удалена папка resources\\app"); }
+                SetStage(70, "Восстановление оригинала...");
                 if (File.Exists(orig))
                 {
                     if (File.Exists(asar)) File.Delete(asar);
                     File.Move(orig, asar);
                     LogLine("Восстановлен оригинальный app.asar");
                 }
+                SetStage(100, "Готово!");
                 LogLine("Готово — программа в исходном виде (английский язык).");
             }
             catch (Exception ex) { LogLine("ОШИБКА: " + ex.Message); }
