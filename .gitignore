@@ -1,4 +1,6 @@
 node_modules/
 *.exe
+*.zip
+checksums.txt
 app.asar*
 tmp/
