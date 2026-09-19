@@ -1,0 +1,21 @@
+# Build artifacts (go to GitHub Releases, not git)
+build/
+*.zip
+checksums.txt
+*.exe
+
+# Dependencies
+node_modules/
+
+# IDE
+.zcode/
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temp
+tmp/
+*.log
