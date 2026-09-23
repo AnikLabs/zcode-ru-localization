@@ -3,6 +3,7 @@
 // Извлекает asar, находит файлы по сигнатурам (не по именам), накладывает патчи,
 // проверяет синтаксис. При критической ошибке — exit 1.
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 import fs from 'fs';
 import path from 'path';
 const require = createRequire(import.meta.url);
@@ -10,7 +11,9 @@ const asar = require('@electron/asar');
 
 const [asarPath, outDir] = process.argv.slice(2);
 if (!asarPath || !outDir) { console.error('usage: node patch.mjs <app.asar> <outDir>'); process.exit(1); }
-const scriptDir = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+// fileURLToPath декодирует %20 и другие escape (pathname — нет):
+// в папках с пробелами ("...x64 (1)") файлы не находились.
+const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const ru = JSON.parse(fs.readFileSync(path.join(scriptDir, 'ru.json'), 'utf8'));
 
 const applied = [], missed = [];
@@ -31,7 +34,8 @@ asar.extractAll(asarPath, outDir);
 // --- 2. найти IntlProvider-файл с каталогом локалей ---
 const assetsDir = path.join(outDir, 'out', 'renderer', 'assets');
 const files = fs.readdirSync(assetsDir).filter(f => f.endsWith('.js'));
-const anchorRe = /(,[A-Za-z_$][\w$]*=n\(\),g=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\})/;
+// имя функции-инициализатора меняется между версиями (n(), r(), ...), поэтому \w+\(\)
+const anchorRe = /(,[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\),g=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\})/;
 let intlFile = null, m = null;
 for (const f of files) {
   const s = fs.readFileSync(path.join(assetsDir, f), 'utf8');
@@ -58,7 +62,11 @@ if (!intlFile) {
   }
   ru['settings.locale.ru-RU'] = 'Русский';
   ru['sidebar.settings.locale.ru-RU'] = 'Русский';
-  const inject = `,zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))}),h=n(),g={"zh-CN":${m[2]},"en-US":${m[3]},"ru-RU":zcodeRuMsgs}`;
+  // интероп jsx-runtime (",h=r()") берём из якоря: имена биндингов меняются между
+  // сборками (в 3.12.3 было h=n(), в 3.14 стало h=r()) — хардкод ломал рендерер:
+  // "(0, h.jsx) is not a function".
+  const interop = m[1].slice(1, m[1].indexOf(',g='));
+  const inject = `,zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))}),${interop},g={"zh-CN":${m[2]},"en-US":${m[3]},"ru-RU":zcodeRuMsgs}`;
   s = s.replace(anchorRe, inject);
   // подпись пункта "Русский" в английском/китайском каталогах
   s = patchText(s, '"settings.locale.en-US":`English`', '"settings.locale.en-US":`English`,"settings.locale.ru-RU":`Русский`', 'label settings');
