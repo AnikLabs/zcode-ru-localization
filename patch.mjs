@@ -35,7 +35,11 @@ asar.extractAll(asarPath, outDir);
 const assetsDir = path.join(outDir, 'out', 'renderer', 'assets');
 const files = fs.readdirSync(assetsDir).filter(f => f.endsWith('.js'));
 // имя функции-инициализатора меняется между версиями (n(), r(), ...), поэтому \w+\(\)
-const anchorRe = /(,[A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\),g=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\})/;
+// Универсальный якорь: ищет паттерн "<interop>,<catalogVar>={"zh-CN":<zh>,"en-US":<en>}"
+// где <interop> — вызов функции (например g=r(), h=r()), <catalogVar> — переменная каталога (_, g, и т.д.)
+// Работает для 3.14.4: "h=r(),g={...}" и 3.16.2: "g=r(),_={...}"
+// Группы: 1=interop, 2=catalogVar, 3=zhVar, 4=enVar
+const anchorRe = /,([A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\)),([A-Za-z_$][\w$]*)=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\}/;
 let intlFile = null, m = null;
 for (const f of files) {
   const s = fs.readFileSync(path.join(assetsDir, f), 'utf8');
@@ -53,7 +57,8 @@ if (!intlFile) {
   // (достаём en-каталог из этого же файла)
   const enAnchor = s.match(anchorRe);
   const before = s.slice(0, enAnchor.index);
-  const enObjStart = before.lastIndexOf('m={') >= 0 ? before.lastIndexOf('m={') : -1;
+  const enVar = enAnchor[4];
+  const enObjStart = before.lastIndexOf(`${enVar}={`) >= 0 ? before.lastIndexOf(`${enVar}={`) : -1;
   if (enObjStart >= 0) {
     const enBody = before.slice(enObjStart + 3);
     const re = /"([^"]+)":`((?:[^`\\]|\\.)*)`/g; let mm; let filled = 0;
@@ -65,8 +70,10 @@ if (!intlFile) {
   // интероп jsx-runtime (",h=r()") берём из якоря: имена биндингов меняются между
   // сборками (в 3.12.3 было h=n(), в 3.14 стало h=r()) — хардкод ломал рендерер:
   // "(0, h.jsx) is not a function".
-  const interop = m[1].slice(1, m[1].indexOf(',g='));
-  const inject = `,zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))}),${interop},g={"zh-CN":${m[2]},"en-US":${m[3]},"ru-RU":zcodeRuMsgs}`;
+  // В новом якоре группа 1 — это уже сам interop (например "g=r()" или "h=r()")
+  // Группа 2 — имя переменной каталога (например "_" или "g")
+  const interop = m[1];
+  const inject = `,zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))}),${interop},${m[2]}={"zh-CN":${m[3]},"en-US":${m[4]},"ru-RU":zcodeRuMsgs}`;
   s = s.replace(anchorRe, inject);
   // подпись пункта "Русский" в английском/китайском каталогах
   s = patchText(s, '"settings.locale.en-US":`English`', '"settings.locale.en-US":`English`,"settings.locale.ru-RU":`Русский`', 'label settings');
