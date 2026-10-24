@@ -1,5 +1,6 @@
 // Русификатор ZCode Desktop — установщик с выбором папки и прогресс-баром.
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
@@ -132,12 +133,11 @@ namespace ZCodeRuInstaller
             log.Clear(); progress.Value = 0; stage.Text = "";
             string dir = pathBox.Text.Trim();
             string res = Path.Combine(dir, "resources");
-            string asar = Path.Combine(res, "app.asar");
             string appDir = Path.Combine(res, "app");
+            string zcodeExe = Path.Combine(dir, "ZCode.exe");
 
-            if (!File.Exists(Path.Combine(dir, "ZCode.exe"))) { LogLine("В этой папке нет ZCode.exe."); return; }
+            if (!File.Exists(zcodeExe)) { LogLine("В этой папке нет ZCode.exe."); return; }
             if (ZCodeRunning(dir)) { LogLine("Сначала ЗАКРОЙТЕ ZCode (включая значок в трее) и повторите."); return; }
-            if (!File.Exists(asar)) { LogLine(Directory.Exists(appDir) ? "Русская локализация уже установлена." : "app.asar не найден — неожиданная структура папки."); return; }
 
             string node = FindNode();
             if (node == null) { LogLine("Не найден Node.js. Установите Node или добавьте в PATH."); return; }
@@ -147,33 +147,185 @@ namespace ZCodeRuInstaller
             string patch = Path.Combine(scriptDir, "patch.mjs");
             if (!File.Exists(patch)) { LogLine("Рядом с программой нет patch.mjs (" + scriptDir + ")"); return; }
 
+            // --- A. Определить asar-источник (не удаляя ничего) ---
+            string targetAsar = await FindAndRestoreMatchingAsar(dir, res, zcodeExe, node, scriptDir);
+            if (targetAsar == null) return; // сообщение уже выведено внутри метода
+
+            // --- Патчинг во временную папку ---
             string temp = Path.Combine(Path.GetTempPath(), "zcode-ru-patch");
             SetStage(5, "Патчинг файлов (1-2 минуты)...");
             progress.Style = ProgressBarStyle.Marquee; progress.MarqueeAnimationSpeed = 30;
             LogLine("Патчу файлы...");
-            int code = RunLive(node, "\"" + patch + "\" \"" + asar + "\" \"" + temp + "\"");
+            int code = RunLive(node, "\"" + patch + "\" \"" + targetAsar + "\" \"" + temp + "\"");
             progress.Style = ProgressBarStyle.Continuous;
             if (code != 0) { SetStage(0, ""); LogLine("Патч не удался — программа НЕ изменена."); return; }
 
-            string backup = Path.Combine(res, "app.asar.bak");
-            if (!File.Exists(backup)) { File.Copy(asar, backup); LogLine("Бэкап: app.asar.bak"); }
-            SetStage(70, "Копирование файлов...");
+            // --- C. Сверка версии пропатченного стейджа ---
+            string stagePackage = Path.Combine(temp, "package.json");
+            if (!File.Exists(stagePackage))
+            {
+                LogLine("ОШИБКА: после патча не найден package.json в стейдже.");
+                try { Directory.Delete(temp, true); } catch { }
+                return;
+            }
+            string stageVersion = ReadVersionFromPackageJson(stagePackage);
+            string zcodeVersion = FileVersionInfo.GetVersionInfo(zcodeExe).ProductVersion;
+            if (!VersionEquals(stageVersion, zcodeVersion))
+            {
+                LogLine("ОШИБКА: версия в пропатченном стейдже (" + stageVersion + ") не совпадает с версией ZCode.exe (" + zcodeVersion + ").");
+                LogLine("Установка отменена, файлы не изменены.");
+                try { Directory.Delete(temp, true); } catch { }
+                return;
+            }
+            LogLine("Версия стейджа подтверждена: " + stageVersion);
 
+            // --- Бэкап app.asar.bak (после успешной сверки) ---
+            string backup = Path.Combine(res, "app.asar.bak");
+            if (!File.Exists(backup)) { File.Copy(targetAsar, backup); LogLine("Бэкап: app.asar.bak"); }
+
+            // --- B. Удалить старый resources\app ТОЛЬКО после успешных проверок ---
+            if (Directory.Exists(appDir))
+            {
+                LogLine("Удаление старой папки resources\\app...");
+                Directory.Delete(appDir, true);
+            }
+
+            // --- Копирование файлов ---
+            SetStage(70, "Копирование файлов...");
             await Task.Run(() => CopyDirectory(temp, appDir, 70, 95));
             try { Directory.Delete(temp, true); } catch { }
 
+            // --- D. Сохранение оригинала: ровно один .orig актуальной версии ---
             SetStage(96, "Сохранение оригинала...");
             string orig = Path.Combine(res, "app.asar.orig");
-            if (File.Exists(asar)) File.Move(asar, orig);
-            LogLine("Оригинал сохранён: app.asar.orig");
+            // Удалить устаревший .orig если он есть и версия не совпадает (или совпадает — это дубль)
+            if (File.Exists(orig))
+            {
+                string origVersion = await ReadVersionFromAsar(node, orig, scriptDir);
+                if (!VersionEquals(origVersion, zcodeVersion))
+                {
+                    LogLine("Удаление устаревшего app.asar.orig (версия " + origVersion + ")");
+                    File.Delete(orig);
+                }
+                else
+                {
+                    LogLine("Удаление дубликата app.asar.orig (та же версия)");
+                    File.Delete(orig);
+                }
+            }
+            // Переместить текущий app.asar -> app.asar.orig
+            if (File.Exists(targetAsar))
+            {
+                File.Move(targetAsar, orig);
+                LogLine("Оригинал сохранён: app.asar.orig");
+            }
 
             SetStage(98, "Включение русского языка...");
             SetLocaleRu();
 
             SetStage(100, "Готово!");
             LogLine("");
-            LogLine("ГОТОВО! Запустите ZCode — интерфейс будет на русском.");
-            MessageBox.Show("Установка завершена!\n\nЗапустите ZCode — интерфейс будет на русском.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            LogLine("Русификация ZCode " + zcodeVersion + " установлена.");
+            MessageBox.Show("Установка завершена!\n\nРусификация ZCode " + zcodeVersion + " установлена.\n\nЗапустите ZCode — интерфейс будет на русском.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+
+        // ===== Вспомогательные методы =====
+
+        // A. Найти подходящий asar и восстановить его как app.asar
+        async Task<string> FindAndRestoreMatchingAsar(string dir, string res, string zcodeExe, string node, string scriptDir)
+        {
+            string zcodeVersion = FileVersionInfo.GetVersionInfo(zcodeExe).ProductVersion;
+            LogLine("Версия ZCode.exe: " + zcodeVersion);
+
+            // Порядок проверки: app.asar, app.asar.orig, app.asar.bak, app.asar.original
+            string[] candidates = {
+                Path.Combine(res, "app.asar"),
+                Path.Combine(res, "app.asar.orig"),
+                Path.Combine(res, "app.asar.bak"),
+                Path.Combine(res, "app.asar.original")
+            };
+
+            foreach (var candidate in candidates)
+            {
+                if (!File.Exists(candidate)) continue;
+
+                string ver = await ReadVersionFromAsar(node, candidate, scriptDir);
+                LogLine("Проверка " + Path.GetFileName(candidate) + ": версия " + ver);
+                if (VersionEquals(ver, zcodeVersion))
+                {
+                    // Восстановить как app.asar если это не он уже
+                    string targetAsar = Path.Combine(res, "app.asar");
+                    if (!string.Equals(candidate, targetAsar, StringComparison.OrdinalIgnoreCase))
+                    {
+                        // Если app.asar уже существует — прочитать его версию и залогировать перед удалением
+                        if (File.Exists(targetAsar))
+                        {
+                            string existingVer = await ReadVersionFromAsar(node, targetAsar, scriptDir);
+                            LogLine("Удалён несовпадающий app.asar (версия " + existingVer + ")");
+                            File.Delete(targetAsar);
+                        }
+                        File.Move(candidate, targetAsar);
+                        LogLine("Восстановлен " + Path.GetFileName(candidate) + " -> app.asar");
+                    }
+                    return targetAsar;
+                }
+            }
+
+            // Ни один не совпал
+            LogLine("");
+            LogLine("ОШИБКА: не найден app.asar с версией, совпадающей с ZCode.exe.");
+            LogLine("Возможная причина: в папке resources остались файлы от старой версии ZCode.");
+            LogLine("Решение: переустановите ZCode 3.16.2 штатным апдейтером/установщиком, затем запустите русификатор снова.");
+            MessageBox.Show(
+                "Не найден app.asar с версией, совпадающей с ZCode.exe.\n\n" +
+                "Возможная причина: в папке resources остались файлы от старой версии ZCode.\n\n" +
+                "Решение: переустановите ZCode 3.16.2 штатным апдейтером/установщиком, затем запустите русификатор снова.",
+                "Ошибка версии", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return null;
+        }
+
+        // Читать версию из asar через @electron/asar extractFile (возвращает Buffer, пишем в файл)
+        // node -e "const fs=require('fs');fs.writeFileSync(process.argv[2],require('@electron/asar').extractFile(process.argv[1],'package.json'))" "<asar>" "<out.json>" "<scriptDir>"
+        async Task<string> ReadVersionFromAsar(string node, string asarPath, string scriptDir)
+        {
+            try
+            {
+                string tempPkg = Path.Combine(Path.GetTempPath(), "zcode-pkg-" + Guid.NewGuid().ToString("N") + ".json");
+                string script = "const fs=require('fs');fs.writeFileSync(process.argv[2],require(require('path').join(process.argv[3],'node_modules','@electron','asar','lib','asar.js')).extractFile(process.argv[1],'package.json'))";
+                int code = RunLive(node, "-e \"" + script + "\" \"" + asarPath + "\" \"" + tempPkg + "\" \"" + scriptDir + "\"");
+                if (code != 0 || !File.Exists(tempPkg))
+                    return "unknown";
+                string ver = ReadVersionFromPackageJson(tempPkg);
+                try { File.Delete(tempPkg); } catch { }
+                return ver;
+            }
+            catch { return "unknown"; }
+        }
+
+        string ReadVersionFromPackageJson(string pkgPath)
+        {
+            try
+            {
+                string json = File.ReadAllText(pkgPath, Encoding.UTF8);
+                var match = Regex.Match(json, "\"version\"\\s*:\\s*\"([^\"]+)\"");
+                return match.Success ? match.Groups[1].Value : "unknown";
+            }
+            catch { return "unknown"; }
+        }
+
+        // BLOCKER 2: сравнивать по первым 3 сегментам (major.minor.patch)
+        bool VersionEquals(string a, string b)
+        {
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
+            if (a == "unknown" || b == "unknown") return false;
+            var aParts = a.Split('.');
+            var bParts = b.Split('.');
+            int len = Math.Min(3, Math.Min(aParts.Length, bParts.Length));
+            for (int i = 0; i < len; i++)
+            {
+                if (aParts[i] != bParts[i]) return false;
+            }
+            return true;
         }
 
         void CopyDirectory(string src, string dst, int fromPct, int toPct)
@@ -220,32 +372,96 @@ namespace ZCodeRuInstaller
             catch (Exception ex) { LogLine("Не удалось прописать язык: " + ex.Message); }
         }
 
-        void Rollback()
+        async void Rollback()
+        {
+            install.Enabled = false; rollback.Enabled = false; browse.Enabled = false;
+            try { await DoRollback(); }
+            catch (Exception ex) { LogLine("ОШИБКА: " + ex.Message); MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+            install.Enabled = true; rollback.Enabled = true; browse.Enabled = true;
+        }
+
+        async Task DoRollback()
         {
             log.Clear(); progress.Value = 0; stage.Text = "";
-            try
-            {
-                string dir = pathBox.Text.Trim();
-                string res = Path.Combine(dir, "resources");
-                string asar = Path.Combine(res, "app.asar");
-                string orig = Path.Combine(res, "app.asar.orig");
-                string appDir = Path.Combine(res, "app");
+            string dir = pathBox.Text.Trim();
+            string res = Path.Combine(dir, "resources");
+            string asar = Path.Combine(res, "app.asar");
+            string appDir = Path.Combine(res, "app");
+            string zcodeExe = Path.Combine(dir, "ZCode.exe");
 
-                if (ZCodeRunning(dir)) { LogLine("Сначала ЗАКРОЙТЕ ZCode."); return; }
-                if (!File.Exists(orig) && !Directory.Exists(appDir)) { LogLine("Откатывать нечего — русификация не установлена."); return; }
-                SetStage(30, "Удаление русской папки...");
-                if (Directory.Exists(appDir)) { Directory.Delete(appDir, true); LogLine("Удалена папка resources\\app"); }
-                SetStage(70, "Восстановление оригинала...");
-                if (File.Exists(orig))
+            if (!File.Exists(zcodeExe)) { LogLine("В этой папке нет ZCode.exe."); return; }
+            if (ZCodeRunning(dir)) { LogLine("Сначала ЗАКРОЙТЕ ZCode (включая значок в трее) и повторите."); return; }
+
+            string node = FindNode();
+            if (node == null) { LogLine("Не найден Node.js. Установите Node или добавьте в PATH."); return; }
+            string scriptDir = Application.StartupPath;
+
+            string zcodeVersion = FileVersionInfo.GetVersionInfo(zcodeExe).ProductVersion;
+            LogLine("Версия ZCode.exe: " + zcodeVersion);
+
+            // Кандидаты для восстановления в порядке приоритета
+            string[] candidates = {
+                Path.Combine(res, "app.asar.orig"),
+                Path.Combine(res, "app.asar.bak"),
+                Path.Combine(res, "app.asar.original")
+            };
+
+            List<string> foundVersions = new List<string>();
+            string matchedCandidate = null;
+            string matchedVersion = null;
+
+            foreach (var candidate in candidates)
+            {
+                if (!File.Exists(candidate))
                 {
-                    if (File.Exists(asar)) File.Delete(asar);
-                    File.Move(orig, asar);
-                    LogLine("Восстановлен оригинальный app.asar");
+                    foundVersions.Add(Path.GetFileName(candidate) + ": (файл не найден)");
+                    continue;
                 }
-                SetStage(100, "Готово!");
-                LogLine("Готово — программа в исходном виде (английский язык).");
+
+                string ver = await ReadVersionFromAsar(node, candidate, scriptDir);
+                foundVersions.Add(Path.GetFileName(candidate) + ": " + ver);
+                LogLine("Проверка " + Path.GetFileName(candidate) + ": версия " + ver);
+
+                if (matchedCandidate == null && VersionEquals(ver, zcodeVersion))
+                {
+                    matchedCandidate = candidate;
+                    matchedVersion = ver;
+                }
             }
-            catch (Exception ex) { LogLine("ОШИБКА: " + ex.Message); }
+
+            // Всегда логируем найденные версии
+            LogLine("");
+            LogLine("Найденные бэкапы: " + string.Join(", ", foundVersions));
+
+            if (matchedCandidate == null)
+            {
+                // Ни один не совпал — отмена отката
+                string msg = "Найденные бэкапы (" + string.Join(", ", foundVersions) + ") не совпадают с версией ZCode (" + zcodeVersion + ").\n\n" +
+                             "Откат отменён — иначе приложение станет старой версии.\n" +
+                             "Переустановите ZCode штатным апдейтером, затем поставьте русификатор заново.";
+                LogLine(msg);
+                MessageBox.Show(msg, "Откат невозможен", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Совпадение найдено — восстанавливаем
+            LogLine("Найден подходящий бэкап: " + Path.GetFileName(matchedCandidate) + " (версия " + matchedVersion + ")");
+            SetStage(30, "Восстановление app.asar...");
+
+            if (File.Exists(asar)) File.Delete(asar);
+            File.Move(matchedCandidate, asar);
+            LogLine("Восстановлен app.asar версии " + matchedVersion + " из " + Path.GetFileName(matchedCandidate));
+
+            SetStage(70, "Удаление русской папки...");
+            if (Directory.Exists(appDir))
+            {
+                Directory.Delete(appDir, true);
+                LogLine("Удалена папка resources\\app");
+            }
+
+            SetStage(100, "Готово!");
+            LogLine("Готово — программа в исходном виде (английский язык).");
+            MessageBox.Show("Откат выполнен успешно.\n\nВосстановлен app.asar версии " + matchedVersion + " из " + Path.GetFileName(matchedCandidate) + ".\n\nЗапустите ZCode — интерфейс будет на английском.", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         [STAThread]
