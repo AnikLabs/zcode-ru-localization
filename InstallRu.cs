@@ -1,8 +1,12 @@
-// Русификатор ZCode Desktop — установщик с выбором папки и прогресс-баром.
+// Русификатор ZCode Desktop — установщик с выбором папки, прогресс-баром
+// и проверкой обновлений через GitHub Releases.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.IO.Compression;
+using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
@@ -12,40 +16,283 @@ namespace ZCodeRuInstaller
 {
     public class MainForm : Form
     {
+        const string InstallerVersion = "1.0.7";
+        const string ReleasesApi = "https://api.github.com/repos/AnikLabs/zcode-ru-localization/releases/latest";
+        const string ReleaseTagPrefix = "v";
+
         TextBox pathBox;
         Button browse, install, rollback;
         TextBox log;
         ProgressBar progress;
         Label stage;
 
+        // --- обновления ---
+        Label lblCurVer, lblUpdate;
+        Button btnCheck, btnDownload;
+        string pendingTag, pendingZipUrl, pendingSumsUrl;
+
         public MainForm()
         {
             Text = "Русификатор ZCode Desktop";
-            Width = 680; Height = 500;
+            Width = 680; Height = 578;
             FormBorderStyle = FormBorderStyle.FixedSingle;
             MaximizeBox = false; StartPosition = FormStartPosition.CenterScreen;
 
-            var lbl = new Label { Text = "Папка с ZCode:", Left = 12, Top = 14, Width = 100 };
-            pathBox = new TextBox { Left = 110, Top = 11, Width = 430 };
-            browse = new Button { Text = "Обзор...", Left = 550, Top = 9, Width = 100 };
-            install = new Button { Text = "Установить русский язык", Left = 12, Top = 45, Width = 300, Height = 32 };
-            rollback = new Button { Text = "Откатить (вернуть как было)", Left = 322, Top = 45, Width = 300, Height = 32 };
-            progress = new ProgressBar { Left = 12, Top = 84, Width = 638, Height = 20, Minimum = 0, Maximum = 100, Value = 0 };
-            stage = new Label { Text = "", Left = 14, Top = 106, Width = 500, ForeColor = System.Drawing.Color.DimGray };
-            log = new TextBox { Left = 12, Top = 130, Width = 638, Height = 300, Multiline = true,
+            // --- секция обновления ---
+            lblCurVer = new Label { Text = "Версия русификатора: " + InstallerVersion, Left = 12, Top = 16, Width = 260 };
+            btnCheck = new Button { Text = "Проверить обновления", Left = 500, Top = 12, Width = 150, Height = 26 };
+            lblUpdate = new Label { Text = "", Left = 12, Top = 44, Width = 470, ForeColor = System.Drawing.Color.DimGray };
+            btnDownload = new Button { Text = "Скачать", Left = 500, Top = 40, Width = 150, Height = 26, Visible = false };
+
+            // --- установка ---
+            var lbl = new Label { Text = "Папка с ZCode:", Left = 12, Top = 86, Width = 100 };
+            pathBox = new TextBox { Left = 110, Top = 83, Width = 430 };
+            browse = new Button { Text = "Обзор...", Left = 550, Top = 81, Width = 100 };
+            install = new Button { Text = "Установить русский язык", Left = 12, Top = 117, Width = 300, Height = 32 };
+            rollback = new Button { Text = "Откатить (вернуть как было)", Left = 322, Top = 117, Width = 300, Height = 32 };
+            progress = new ProgressBar { Left = 12, Top = 156, Width = 638, Height = 20, Minimum = 0, Maximum = 100, Value = 0 };
+            stage = new Label { Text = "", Left = 14, Top = 178, Width = 500, ForeColor = System.Drawing.Color.DimGray };
+            log = new TextBox { Left = 12, Top = 202, Width = 638, Height = 296, Multiline = true,
                 ScrollBars = ScrollBars.Vertical, ReadOnly = true, Font = new System.Drawing.Font("Consolas", 9) };
 
             browse.Click += (s, e) => Browse();
             install.Click += (s, e) => Install();
             rollback.Click += (s, e) => Rollback();
+            btnCheck.Click += (s, e) => { btnCheck.Enabled = false; CheckUpdates(false); };
+            btnDownload.Click += (s, e) => DownloadUpdate();
 
+            Controls.Add(lblCurVer); Controls.Add(btnCheck); Controls.Add(lblUpdate); Controls.Add(btnDownload);
             Controls.Add(lbl); Controls.Add(pathBox); Controls.Add(browse);
             Controls.Add(install); Controls.Add(rollback); Controls.Add(progress);
             Controls.Add(stage); Controls.Add(log);
 
             string found = FindZCode();
             if (found != null) pathBox.Text = found;
+
+            // тихая проверка обновлений при старте
+            Task.Run((Action)(() => CheckUpdates(true)));
         }
+
+        // ================= ОБНОВЛЕНИЯ =================
+
+        class ReleaseInfo { public string Tag; public string ZipUrl; public string SumsUrl; }
+
+        void CheckUpdates(bool silent)
+        {
+            SafeInvoke(() => { lblUpdate.Text = "Проверка обновлений..."; lblUpdate.ForeColor = System.Drawing.Color.DimGray; });
+            try
+            {
+                ReleaseInfo rel = FetchLatestRelease();
+                if (rel == null) throw new Exception("ответ GitHub не распознан");
+                string latest = rel.Tag.StartsWith(ReleaseTagPrefix) ? rel.Tag.Substring(1) : rel.Tag;
+                int cmp = CompareVersions(latest, InstallerVersion);
+                SafeInvoke(() =>
+                {
+                    btnCheck.Enabled = true;
+                    if (cmp > 0)
+                    {
+                        lblUpdate.Text = "Доступна новая версия русификатора: " + rel.Tag;
+                        lblUpdate.ForeColor = System.Drawing.Color.Firebrick;
+                        pendingTag = rel.Tag; pendingZipUrl = rel.ZipUrl; pendingSumsUrl = rel.SumsUrl;
+                        btnDownload.Text = "Скачать " + rel.Tag;
+                        btnDownload.Visible = true;
+                    }
+                    else if (cmp == 0)
+                    {
+                        lblUpdate.Text = "У вас последняя версия (" + rel.Tag + ").";
+                        lblUpdate.ForeColor = System.Drawing.Color.Green;
+                        btnDownload.Visible = false;
+                    }
+                    else
+                    {
+                        lblUpdate.Text = "Установленная версия новее, чем последний релиз (" + rel.Tag + ").";
+                        lblUpdate.ForeColor = System.Drawing.Color.DimGray;
+                        btnDownload.Visible = false;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                SafeInvoke(() =>
+                {
+                    btnCheck.Enabled = true;
+                    lblUpdate.Text = silent ? "" : "Не удалось проверить обновления: " + ex.Message;
+                    if (!silent) lblUpdate.ForeColor = System.Drawing.Color.Firebrick;
+                });
+                if (!silent) LogLine("Проверка обновлений не удалась: " + ex.Message);
+            }
+        }
+
+        ReleaseInfo FetchLatestRelease()
+        {
+            string json = HttpGet(ReleasesApi);
+            var rel = new ReleaseInfo();
+            var mTag = Regex.Match(json, "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+            if (!mTag.Success) return null;
+            rel.Tag = mTag.Groups[1].Value;
+            var mZip = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*?" + Regex.Escape("zcode-ru-localization-" + rel.Tag.Substring(1) + "-windows-x64.zip") + ")\"");
+            var mSums = Regex.Match(json, "\"browser_download_url\"\\s*:\\s*\"([^\"]*?/checksums\\.txt)\"");
+            if (!mZip.Success || !mSums.Success) return null;
+            rel.ZipUrl = mZip.Groups[1].Value;
+            rel.SumsUrl = mSums.Groups[1].Value;
+            return rel;
+        }
+
+        string HttpGet(string url)
+        {
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768 | SecurityProtocolType.Tls;
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "zcode-ru-localization-updater";
+            req.Accept = "application/vnd.github+json";
+            req.Timeout = 15000;
+            using (var resp = req.GetResponse())
+            using (var sr = new StreamReader(resp.GetResponseStream(), Encoding.UTF8))
+                return sr.ReadToEnd();
+        }
+
+        // 1 → a новее; 0 → равны; −1 → a старее
+        int CompareVersions(string a, string b)
+        {
+            var pa = ParseSegments(a); var pb = ParseSegments(b);
+            int len = Math.Max(pa.Count, pb.Count);
+            for (int i = 0; i < len; i++)
+            {
+                int x = i < pa.Count ? pa[i] : 0;
+                int y = i < pb.Count ? pb[i] : 0;
+                if (x != y) return x > y ? 1 : -1;
+            }
+            return 0;
+        }
+
+        List<int> ParseSegments(string v)
+        {
+            var list = new List<int>();
+            foreach (var part in v.Trim().TrimStart('v', 'V').Split('.'))
+            {
+                int n;
+                if (int.TryParse(part, out n)) list.Add(n);
+            }
+            return list;
+        }
+
+        void DownloadUpdate()
+        {
+            btnDownload.Enabled = false; btnCheck.Enabled = false;
+            install.Enabled = false; rollback.Enabled = false; browse.Enabled = false;
+            string tag = pendingTag, zipUrl = pendingZipUrl, sumsUrl = pendingSumsUrl;
+            Task.Run((Action)(() =>
+            {
+                try
+                {
+                    string workDir = Path.Combine(Path.GetTempPath(), "zcode-ru-update");
+                    string tagDir = Path.Combine(workDir, tag);
+                    string zipPath = Path.Combine(workDir, tag + ".zip");
+                    try { Directory.CreateDirectory(workDir); } catch { }
+                    if (Directory.Exists(tagDir)) { try { Directory.Delete(tagDir, true); } catch { } }
+
+                    SafeInvoke(() => { progress.Value = 0; stage.Text = "Скачивание " + tag + "..."; });
+                    LogLine("Скачиваю " + zipUrl);
+                    HttpDownload(zipUrl, zipPath, (pct, msg) => SafeInvoke(() => { progress.Value = pct; stage.Text = msg; }));
+                    LogLine("Скачано: " + new FileInfo(zipPath).Length + " байт");
+
+                    SafeInvoke(() => { stage.Text = "Проверка SHA-256..."; });
+                    string sums = HttpGet(sumsUrl);
+                    string expected = null;
+                    foreach (var line in sums.Split('\n'))
+                    {
+                        var parts = line.Trim().Split(new[] { ' ' }, 2);
+                        if (parts.Length == 2 && parts[1].Trim().IndexOf("windows-x64.zip", StringComparison.OrdinalIgnoreCase) >= 0)
+                        { expected = parts[0].Trim().ToLower(); break; }
+                    }
+                    string actual = Sha256File(zipPath);
+                    LogLine("SHA-256: " + actual);
+                    if (expected == null) throw new Exception("в checksums.txt не найден хэш zip");
+                    if (!string.Equals(expected, actual, StringComparison.OrdinalIgnoreCase))
+                        throw new Exception("Хэш не совпал!\nОжидался: " + expected + "\nПолучен:   " + actual);
+                    LogLine("SHA-256 совпал.");
+
+                    SafeInvoke(() => { stage.Text = "Распаковка..."; progress.Value = 90; });
+                    Directory.CreateDirectory(tagDir);
+                    ZipFile.ExtractToDirectory(zipPath, tagDir);
+
+                    string newExe = Path.Combine(tagDir, "РусификаторZCode.exe");
+                    if (!File.Exists(newExe)) throw new Exception("в архиве нет РусификаторZCode.exe");
+
+                    SafeInvoke(() =>
+                    {
+                        SetStage(100, "Обновление " + tag + " скачано и проверено.");
+                        var ans = MessageBox.Show("Новая версия " + tag + " скачана и проверена (SHA-256 OK).\n\nЗапустить новую версию русификатора?",
+                            "Обновление готово", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                        if (ans == DialogResult.Yes)
+                        {
+                            Process.Start(new ProcessStartInfo(newExe) { WorkingDirectory = tagDir });
+                            Close();
+                        }
+                        btnDownload.Enabled = true; btnCheck.Enabled = true;
+                        install.Enabled = true; rollback.Enabled = true; browse.Enabled = true;
+                    });
+                }
+                catch (Exception ex)
+                {
+                    SafeInvoke(() =>
+                    {
+                        LogLine("ОШИБКА обновления: " + ex.Message);
+                        MessageBox.Show(ex.Message, "Ошибка обновления", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        progress.Value = 0; stage.Text = "";
+                        btnDownload.Enabled = true; btnCheck.Enabled = true;
+                        install.Enabled = true; rollback.Enabled = true; browse.Enabled = true;
+                    });
+                }
+            }));
+        }
+
+        void HttpDownload(string url, string dest, Action<int, string> onProgress)
+        {
+            ServicePointManager.SecurityProtocol = (SecurityProtocolType)3072 | (SecurityProtocolType)768 | SecurityProtocolType.Tls;
+            var req = (HttpWebRequest)WebRequest.Create(url);
+            req.UserAgent = "zcode-ru-localization-updater";
+            req.Timeout = 30000;
+            using (var resp = req.GetResponse())
+            using (var input = resp.GetResponseStream())
+            using (var output = File.Create(dest))
+            {
+                long total = resp.ContentLength; long done = 0; int lastPct = 0;
+                var buf = new byte[65536];
+                int read;
+                while ((read = input.Read(buf, 0, buf.Length)) > 0)
+                {
+                    output.Write(buf, 0, read);
+                    done += read;
+                    int pct = total > 0 ? (int)(done * 100 / total) : 0;
+                    if (pct != lastPct)
+                    {
+                        lastPct = pct;
+                        double mb = done / 1048576.0;
+                        onProgress(pct, string.Format("Скачивание: {0}% ({1:F1} МБ)", pct, mb));
+                    }
+                }
+            }
+        }
+
+        string Sha256File(string path)
+        {
+            using (var sha = SHA256.Create())
+            using (var fs = File.OpenRead(path))
+            {
+                var hash = sha.ComputeHash(fs);
+                var sb = new StringBuilder(hash.Length * 2);
+                foreach (var b in hash) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+        }
+
+        void SafeInvoke(Action a)
+        {
+            try { Invoke((MethodInvoker)delegate { a(); }); }
+            catch { a(); }
+        }
+
+        // ================= УСТАНОВКА (логика без изменений) =================
 
         string FindZCode()
         {
@@ -60,12 +307,14 @@ namespace ZCodeRuInstaller
 
         void LogLine(string s)
         {
+            if (log.InvokeRequired) { try { Invoke((MethodInvoker)delegate { LogLine(s); }); } catch { } return; }
             log.AppendText(s + Environment.NewLine);
             Application.DoEvents();
         }
 
         void SetStage(int percent, string text)
         {
+            if (progress.InvokeRequired) { try { Invoke((MethodInvoker)delegate { SetStage(percent, text); }); } catch { } return; }
             progress.Value = Math.Max(progress.Minimum, Math.Min(progress.Maximum, percent));
             stage.Text = text;
             Application.DoEvents();
@@ -198,7 +447,6 @@ namespace ZCodeRuInstaller
             // --- D. Сохранение оригинала: ровно один .orig актуальной версии ---
             SetStage(96, "Сохранение оригинала...");
             string orig = Path.Combine(res, "app.asar.orig");
-            // Удалить устаревший .orig если он есть и версия не совпадает (или совпадает — это дубль)
             if (File.Exists(orig))
             {
                 string origVersion = await ReadVersionFromAsar(node, orig, scriptDir);
@@ -213,7 +461,6 @@ namespace ZCodeRuInstaller
                     File.Delete(orig);
                 }
             }
-            // Переместить текущий app.asar -> app.asar.orig
             if (File.Exists(targetAsar))
             {
                 File.Move(targetAsar, orig);
@@ -231,13 +478,11 @@ namespace ZCodeRuInstaller
 
         // ===== Вспомогательные методы =====
 
-        // A. Найти подходящий asar и восстановить его как app.asar
         async Task<string> FindAndRestoreMatchingAsar(string dir, string res, string zcodeExe, string node, string scriptDir)
         {
             string zcodeVersion = FileVersionInfo.GetVersionInfo(zcodeExe).ProductVersion;
             LogLine("Версия ZCode.exe: " + zcodeVersion);
 
-            // Порядок проверки: app.asar, app.asar.orig, app.asar.bak, app.asar.original
             string[] candidates = {
                 Path.Combine(res, "app.asar"),
                 Path.Combine(res, "app.asar.orig"),
@@ -253,11 +498,9 @@ namespace ZCodeRuInstaller
                 LogLine("Проверка " + Path.GetFileName(candidate) + ": версия " + ver);
                 if (VersionEquals(ver, zcodeVersion))
                 {
-                    // Восстановить как app.asar если это не он уже
                     string targetAsar = Path.Combine(res, "app.asar");
                     if (!string.Equals(candidate, targetAsar, StringComparison.OrdinalIgnoreCase))
                     {
-                        // Если app.asar уже существует — прочитать его версию и залогировать перед удалением
                         if (File.Exists(targetAsar))
                         {
                             string existingVer = await ReadVersionFromAsar(node, targetAsar, scriptDir);
@@ -271,21 +514,18 @@ namespace ZCodeRuInstaller
                 }
             }
 
-            // Ни один не совпал
             LogLine("");
             LogLine("ОШИБКА: не найден app.asar с версией, совпадающей с ZCode.exe.");
             LogLine("Возможная причина: в папке resources остались файлы от старой версии ZCode.");
-            LogLine("Решение: переустановите ZCode 3.16.2 штатным апдейтером/установщиком, затем запустите русификатор снова.");
+            LogLine("Решение: переустановите ZCode штатным апдейтером/установщиком, затем запустите русификатор снова.");
             MessageBox.Show(
                 "Не найден app.asar с версией, совпадающей с ZCode.exe.\n\n" +
                 "Возможная причина: в папке resources остались файлы от старой версии ZCode.\n\n" +
-                "Решение: переустановите ZCode 3.16.2 штатным апдейтером/установщиком, затем запустите русификатор снова.",
+                "Решение: переустановите ZCode штатным апдейтером/установщиком, затем запустите русификатор снова.",
                 "Ошибка версии", MessageBoxButtons.OK, MessageBoxIcon.Error);
             return null;
         }
 
-        // Читать версию из asar через @electron/asar extractFile (возвращает Buffer, пишем в файл)
-        // node -e "const fs=require('fs');fs.writeFileSync(process.argv[2],require('@electron/asar').extractFile(process.argv[1],'package.json'))" "<asar>" "<out.json>" "<scriptDir>"
         async Task<string> ReadVersionFromAsar(string node, string asarPath, string scriptDir)
         {
             try
@@ -313,7 +553,6 @@ namespace ZCodeRuInstaller
             catch { return "unknown"; }
         }
 
-        // BLOCKER 2: сравнивать по первым 3 сегментам (major.minor.patch)
         bool VersionEquals(string a, string b)
         {
             if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b)) return false;
@@ -399,7 +638,6 @@ namespace ZCodeRuInstaller
             string zcodeVersion = FileVersionInfo.GetVersionInfo(zcodeExe).ProductVersion;
             LogLine("Версия ZCode.exe: " + zcodeVersion);
 
-            // Кандидаты для восстановления в порядке приоритета
             string[] candidates = {
                 Path.Combine(res, "app.asar.orig"),
                 Path.Combine(res, "app.asar.bak"),
@@ -429,13 +667,11 @@ namespace ZCodeRuInstaller
                 }
             }
 
-            // Всегда логируем найденные версии
             LogLine("");
             LogLine("Найденные бэкапы: " + string.Join(", ", foundVersions));
 
             if (matchedCandidate == null)
             {
-                // Ни один не совпал — отмена отката
                 string msg = "Найденные бэкапы (" + string.Join(", ", foundVersions) + ") не совпадают с версией ZCode (" + zcodeVersion + ").\n\n" +
                              "Откат отменён — иначе приложение станет старой версии.\n" +
                              "Переустановите ZCode штатным апдейтером, затем поставьте русификатор заново.";
@@ -444,7 +680,6 @@ namespace ZCodeRuInstaller
                 return;
             }
 
-            // Совпадение найдено — восстанавливаем
             LogLine("Найден подходящий бэкап: " + Path.GetFileName(matchedCandidate) + " (версия " + matchedVersion + ")");
             SetStage(30, "Восстановление app.asar...");
 
@@ -465,11 +700,15 @@ namespace ZCodeRuInstaller
         }
 
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            var form = new MainForm();
+            // Необязательный аргумент: путь к папке ZCode (пресет для стендовых тестов)
+            if (args != null && args.Length > 0 && File.Exists(Path.Combine(args[0], "ZCode.exe")))
+                form.pathBox.Text = args[0];
+            Application.Run(form);
         }
     }
 }
