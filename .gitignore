@@ -4,3 +4,8 @@ node_modules/
 checksums.txt
 app.asar*
 tmp/
+
+# Внутренние файлы конвейера (не для публичного репозитория)
+pipeline/
+CHANGELOG.md
+package.json
