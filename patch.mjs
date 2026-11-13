@@ -26,6 +26,57 @@ function patchText(s, from, to, label, isRe = false) {
   applied.push(label); return s.split(from).join(to);
 }
 
+// Вспомогательная: найти индекс парной закрывающей скобки } для { в позиции openIdx
+// Учитывает вложенность и строковые литералы (", ', `)
+function findMatchingBrace(str, openIdx) {
+  if (str[openIdx] !== '{') return -1;
+  let depth = 0;
+  let inString = false;
+  let stringChar = '';
+  let escaped = false;
+  for (let i = openIdx; i < str.length; i++) {
+    const ch = str[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (inString) {
+      if (ch === stringChar) inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { inString = true; stringChar = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+// Вспомогательная: найти конец значения (объекта, массива, примитива) начиная с startIdx
+// Для нашего случая (значение ru-RU — это объект {…}) достаточно findMatchingBrace
+function findValueEnd(str, startIdx) {
+  if (str[startIdx] === '{') {
+    const end = findMatchingBrace(str, startIdx);
+    return end >= 0 ? end + 1 : str.length;
+  }
+  // Общий случай: ищем следующую запятую или } на верхнем уровне
+  let depth = 0;
+  let inString = false;
+  let stringChar = '';
+  let escaped = false;
+  for (let i = startIdx; i < str.length; i++) {
+    const ch = str[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (inString) { if (ch === stringChar) inString = false; continue; }
+    if (ch === '"' || ch === "'" || ch === '`') { inString = true; stringChar = ch; continue; }
+    if (ch === '{' || ch === '[') depth++;
+    else if (ch === '}' || ch === ']') depth--;
+    if (depth === 0 && (ch === ',' || ch === '}')) return i;
+  }
+  return str.length;
+}
+
 // --- 1. извлечение ---
 console.log('Извлекаю asar ...');
 if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true, force: true });
@@ -34,16 +85,17 @@ asar.extractAll(asarPath, outDir);
 // --- 2. найти IntlProvider-файл с каталогом локалей ---
 const assetsDir = path.join(outDir, 'out', 'renderer', 'assets');
 const files = fs.readdirSync(assetsDir).filter(f => f.endsWith('.js'));
-// имя функции-инициализатора меняется между версиями (n(), r(), ...), поэтому \w+\(\)
-// Универсальный якорь: ищет паттерн "<interop>,<catalogVar>={"zh-CN":<zh>,"en-US":<en>}"
-// где <interop> — вызов функции (например g=r(), h=r()), <catalogVar> — переменная каталога (_, g, и т.д.)
-// Работает для 3.14.4: "h=r(),g={...}" и 3.16.2: "g=r(),_={...}"
-// Группы: 1=interop, 2=catalogVar, 3=zhVar, 4=enVar
-const anchorRe = /,([A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\)),([A-Za-z_$][\w$]*)=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\}/;
+// Якорь: ищет каталог локалей в двух формах:
+// 1. Старый (3.16/3.17): ",<interop>,<catalogVar>={"zh-CN":<zh>,"en-US":<en>...}" — сразу закрывается
+// 2. Новый (3.18.2+): "},<catalogVar>={"zh-CN":<zh>,"en-US":<en>,...}" — после en-US идут другие локали
+// Группы для старого: 1=interop, 2=catalogVar, 3=zhVar, 4=enVar
+// Группы для нового: 1=undefined, 2=catalogVar, 3=zhVar, 4=enVar (interop нет перед каталогом)
+const anchorReOld = /,([A-Za-z_$][\w$]*=[A-Za-z_$][\w$]*\(\)),([A-Za-z_$][\w$]*)=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)\}/;
+const anchorReNew = /},([A-Za-z_$][\w$]*)=\{"zh-CN":([A-Za-z_$][\w$]*),"en-US":([A-Za-z_$][\w$]*)/;
 let intlFile = null, m = null;
 for (const f of files) {
   const s = fs.readFileSync(path.join(assetsDir, f), 'utf8');
-  m = s.match(anchorRe);
+  m = s.match(anchorReOld) || s.match(anchorReNew);
   if (m) { intlFile = path.join(assetsDir, f); break; }
 }
 if (!intlFile) {
@@ -53,11 +105,14 @@ if (!intlFile) {
 }
 {
   let s = fs.readFileSync(intlFile, 'utf8');
-  // дополнить ru-каталог: отсутствующие ключи — английские значения
-  // (достаём en-каталог из этого же файла)
-  const enAnchor = s.match(anchorRe);
-  const before = s.slice(0, enAnchor.index);
-  const enVar = enAnchor[4];
+  // --- 2a. дополнить ru-каталог: отсутствующие ключи — английские значения ---
+  // (достаём en-каталог из этого же файла, до каталога локалей)
+  // Определяем, какой регекс сработал
+  const isOldFormat = !!s.match(anchorReOld);
+  const enAnchorMatch = isOldFormat ? s.match(anchorReOld) : s.match(anchorReNew);
+  const before = s.slice(0, enAnchorMatch.index);
+  // Группы: old=[1=interop,2=catalogVar,3=zhVar,4=enVar], new=[1=catalogVar,2=zhVar,3=enVar]
+  const enVar = isOldFormat ? enAnchorMatch[4] : enAnchorMatch[3];
   const enObjStart = before.lastIndexOf(`${enVar}={`) >= 0 ? before.lastIndexOf(`${enVar}={`) : -1;
   if (enObjStart >= 0) {
     const enBody = before.slice(enObjStart + 3);
@@ -67,18 +122,96 @@ if (!intlFile) {
   }
   ru['settings.locale.ru-RU'] = 'Русский';
   ru['sidebar.settings.locale.ru-RU'] = 'Русский';
-  // интероп jsx-runtime (",h=r()") берём из якоря: имена биндингов меняются между
-  // сборками (в 3.12.3 было h=n(), в 3.14 стало h=r()) — хардкод ломал рендерер:
-  // "(0, h.jsx) is not a function".
-  // В новом якоре группа 1 — это уже сам interop (например "g=r()" или "h=r()")
-  // Группа 2 — имя переменной каталога (например "_" или "g")
-  const interop = m[1];
-  const inject = `,zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))}),${interop},${m[2]}={"zh-CN":${m[3]},"en-US":${m[4]},"ru-RU":zcodeRuMsgs}`;
-  s = s.replace(anchorRe, inject);
-  // подпись пункта "Русский" в английском/китайском каталогах
+
+  // --- 2b. инъект ru-RU в каталог ---
+  const match = isOldFormat ? s.match(anchorReOld) : s.match(anchorReNew);
+  const matchIndex = match.index;
+  
+  let interop, catalogVar, zhVar, enVarFromMatch;
+  if (isOldFormat) {
+    interop = match[1];
+    catalogVar = match[2];
+    zhVar = match[3];
+    enVarFromMatch = match[4];
+  } else {
+    interop = null; // в новой форме перед каталогом нет interop
+    catalogVar = match[1];
+    zhVar = match[2];
+    enVarFromMatch = match[3];
+  }
+
+  // Позиция начала присваивания каталога
+  let catalogAssignStart;
+  if (isOldFormat) {
+    // Старый формат: ",<interop>,<catalogVar>={..."
+    // match.index указывает на запятую перед interop
+    catalogAssignStart = matchIndex + 1 + interop.length + 1; // после ",interop," -> catalogVar
+  } else {
+    // Новый формат: "},<catalogVar>={..."
+    // match.index указывает на '}' перед запятой
+    // match[0] начинается с "}," поэтому catalogVar начинается на match.index + 2
+    catalogAssignStart = matchIndex + 2; // после "}," -> catalogVar
+  }
+  const catalogObjStart = catalogAssignStart + catalogVar.length + 1; // индекс '{' после '='
+  const catalogObjEnd = findMatchingBrace(s, catalogObjStart);
+  if (catalogObjEnd < 0) {
+    console.error('КРИТИЧНО: не найдена закрывающая скобка каталога локалей');
+    process.exit(1);
+  }
+
+  // Содержимое каталога БЕЗ внешних { }
+  const catalogContent = s.slice(catalogObjStart + 1, catalogObjEnd);
+
+  // Проверяем, есть ли уже "ru-RU":
+  const ruRUKey = '"ru-RU":';
+  const ruRUIdx = catalogContent.indexOf(ruRUKey);
+  let newCatalogContent;
+
+  if (ruRUIdx >= 0) {
+    // --- НОВАЯ ФОРМА (3.18.2+): ru-RU уже есть, значение — объект со спредами ---
+    const ruRUValueStart = ruRUIdx + ruRUKey.length;
+    const ruRUValueEnd = findValueEnd(catalogContent, ruRUValueStart);
+    const existingRuRUValue = catalogContent.slice(ruRUValueStart, ruRUValueEnd);
+    const newRuRUValue = existingRuRUValue.slice(0, -1) + ',...zcodeRuMsgs}';
+    newCatalogContent = catalogContent.slice(0, ruRUValueStart) + newRuRUValue + catalogContent.slice(ruRUValueEnd);
+    applied.push('ru-RU: заменено вендорское значение на спред + zcodeRuMsgs');
+  } else {
+    // --- СТАРАЯ ФОРМА (3.16/3.17): ru-RU нет — вставляем после "en-US":<enVar> ---
+    const enUSPattern = `"en-US":${enVarFromMatch}`;
+    const enUSIdx = catalogContent.indexOf(enUSPattern);
+    if (enUSIdx >= 0) {
+      const insertPos = enUSIdx + enUSPattern.length;
+      newCatalogContent = catalogContent.slice(0, insertPos) + `,"ru-RU":zcodeRuMsgs` + catalogContent.slice(insertPos);
+    } else {
+      // Фоллбэк: вставляем в конец каталога
+      newCatalogContent = catalogContent + `,"ru-RU":zcodeRuMsgs`;
+    }
+    applied.push('ru-RU: вставлен новый ключ после en-US');
+  }
+
+  // Собираем новое присваивание каталога
+  const newCatalogAssignment = `${catalogVar}={${newCatalogContent}}`;
+
+  // Определение zcodeRuMsgs ВСТАВЛЯЕМ ПЕРЕД каталогом
+  const zcodeRuMsgsDef = `zcodeRuMsgs=JSON.parse(${JSON.stringify(JSON.stringify(ru))})`;
+  // Заменяем от начала якоря (matchIndex) до конца каталога (catalogObjEnd) включительно
+  const prefix = s.slice(0, matchIndex);
+  const suffix = s.slice(catalogObjEnd + 1);
+  let newMiddle;
+  if (isOldFormat) {
+    // Старый: ",<interop>,<catalogVar>={...}" -> ",zcodeRuMsgsDef,<interop>,<catalogVar>={...}"
+    newMiddle = `,${zcodeRuMsgsDef},${interop},${newCatalogAssignment}`;
+  } else {
+    // Новый: "},<catalogVar>={...}" -> "},zcodeRuMsgsDef,<catalogVar>={...}"
+    newMiddle = `},${zcodeRuMsgsDef},${newCatalogAssignment}`;
+  }
+  s = prefix + newMiddle + suffix;
+
+  // --- 2c. подпись пункта "Русский" в английском/китайском каталогах ---
   s = patchText(s, '"settings.locale.en-US":`English`', '"settings.locale.en-US":`English`,"settings.locale.ru-RU":`Русский`', 'label settings');
   s = patchText(s, '"sidebar.settings.locale.en-US":`English`', '"sidebar.settings.locale.en-US":`English`,"sidebar.settings.locale.ru-RU":`Русский`', 'label sidebar');
   // подпись в китайском каталоге: значение уже «中文简体»-стиль, ключа ru там нет — не критично
+
   fs.writeFileSync(intlFile, s, 'utf8');
   applied.push('каталог ru-RU внедрён в ' + path.basename(intlFile));
 }

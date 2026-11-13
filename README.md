@@ -1,4 +1,5 @@
 <p align="center">
+⚠️ **PROJECT COMPLETED (archived).** ZCode 3.18.2+ ships official Russian localization — enable it in the app settings (Settings → Language → Русский). The russifier is no longer needed: the final version v1.0.9 remains in Releases for 100% coverage and repair of broken installs.
   <strong>-------></strong>
   <a href="/README.ru.md">Russian</a> |
   <a href="/README.md">English</a> |

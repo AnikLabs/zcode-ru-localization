@@ -34,6 +34,7 @@ namespace ZCodeRuInstaller
         MaterialProgressBar progress;
         MaterialLabel stage;
         Label lblVersion;
+        static bool autoInstall;
 
         public MainForm()
         {
@@ -134,6 +135,9 @@ namespace ZCodeRuInstaller
 
             string found = FindZCode();
             if (found != null) pathBox.Text = found;
+
+            // /install — автоматический старт установки (для стендовых тестов)
+            if (autoInstall) Shown += (s, e) => Install();
 
             Shown += (s, e) => CheckUpdates();
         }
@@ -562,8 +566,13 @@ namespace ZCodeRuInstaller
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             var form = new MainForm();
-            if (args != null && args.Length > 0 && File.Exists(Path.Combine(args[0], "ZCode.exe")))
-                form.pathBox.Text = args[0];
+            if (args != null && args.Length > 0)
+            {
+                if (File.Exists(Path.Combine(args[0], "ZCode.exe")))
+                    form.pathBox.Text = args[0];
+                if (args.Length > 1 && args[1] == "/install" && File.Exists(Path.Combine(args[0], "ZCode.exe")))
+                    autoInstall = true;
+            }
             Application.Run(form);
         }
     }
